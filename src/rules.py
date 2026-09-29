@@ -94,14 +94,38 @@ def _complete_task(actor, entity, data, lookup):
     return {"completed_by": actor.user_id}
 
 
+def _start_emergency_fan(actor, entity, data, lookup):
+    return {"mode": "emergency", "emergency_started_by": actor.user_id}
+
+
 def _close_incident(actor, entity, data, lookup):
     if [w for w in _all(lookup, "worker") if w["status"] in ("missing", "located")]:
         raise ConflictError("cannot close incident while workers are missing or located")
     active_tasks = [t for t in _all(lookup, "task") if t["status"] not in ("completed", "cancelled")]
     if active_tasks:
         raise ConflictError("cannot close incident while tasks remain active")
-    if [v for v in _all(lookup, "ventilation") if v["status"] != "running"]:
-        raise ConflictError("cannot close incident until ventilation is restored")
+
+    orders = [
+        order
+        for order in _all(lookup, "linkage_order")
+        if order["data"].get("incident_id") == entity["id"]
+    ]
+    if not orders:
+        # Historical incidents predate linkage orders: keep the original global rule.
+        if [v for v in _all(lookup, "ventilation") if v["status"] != "running"]:
+            raise ConflictError("cannot close incident until ventilation is restored")
+    else:
+        active_orders = [order for order in orders if order["status"] not in ("completed", "cancelled")]
+        if active_orders:
+            raise ConflictError("cannot close incident while linkage orders remain active")
+        fans = {fan["id"]: fan for fan in _all(lookup, "ventilation")}
+        affected_ids = set()
+        for order in orders:
+            affected_ids.update(order["data"].get("affected_fan_ids", []))
+        for fan_id in sorted(affected_ids):
+            fan = fans.get(fan_id)
+            if not fan or fan["status"] != "running":
+                raise ConflictError("cannot close incident until affected ventilation is restored")
     return {"closed_by": actor.user_id}
 
 
@@ -109,12 +133,13 @@ class RuleEngine:
     ALIASES = {
         "workers": "worker", "sensors": "sensor", "ventilations": "ventilation",
         "passages": "passage", "refuges": "refuge", "incidents": "incident",
-        "tasks": "task", "offline-records": "offline_record", "offline_records": "offline_record",
+        "tasks": "task", "linkage-orders": "linkage_order", "linkage_orders": "linkage_order",
+        "offline-records": "offline_record", "offline_records": "offline_record",
     }
     INITIAL_STATUS = {
         "worker": "active", "sensor": "normal", "ventilation": "running",
         "passage": "open", "refuge": "available", "incident": "detected",
-        "task": "proposed", "offline_record": "merged",
+        "task": "proposed", "linkage_order": "active", "offline_record": "merged",
     }
     TRANSITIONS = {
         "worker": {
@@ -135,6 +160,7 @@ class RuleEngine:
         "ventilation": {
             "degrade": (("running",), "degraded"),
             "stop": (("running", "degraded"), "stopped"),
+            "emergency_start": (("running", "degraded", "stopped"), "running"),
             "restore": (("stopped", "degraded"), "running"),
         },
         "passage": {
@@ -162,6 +188,10 @@ class RuleEngine:
             "complete": (("in_progress",), "completed"),
             "cancel": (("proposed", "assigned", "in_progress"), "cancelled"),
         },
+        "linkage_order": {
+            "cancel": (("active",), "cancelled"),
+            "complete": (("active",), "completed"),
+        },
     }
     CREATE_REQUIRED = {
         "worker": ("name", "location_code", "team"),
@@ -181,6 +211,7 @@ class RuleEngine:
         ("incident", "close"): ("summary",),
         ("task", "complete"): ("result",),
         ("task", "cancel"): ("reason",),
+        ("linkage_order", "cancel"): ("reason",),
     }
     CREATE_ROLES = {
         "worker": ("admin", "safety", "dispatcher"),
@@ -190,6 +221,7 @@ class RuleEngine:
         "refuge": ("admin", "safety"),
         "incident": ("admin", "safety", "dispatcher"),
         "task": ("admin", "dispatcher", "safety"),
+        "linkage_order": ("admin", "safety", "dispatcher"),
         "offline_record": ("admin", "safety", "dispatcher", "field"),
     }
     ROLE_ACTIONS = {
@@ -206,11 +238,12 @@ class RuleEngine:
         "verify_misread": ("admin", "safety"),
         "degrade": ("admin", "safety"),
         "stop": ("admin", "safety"),
+        "emergency_start": ("admin", "safety", "dispatcher"),
         "restore": ("admin", "safety"),
         "restrict": ("admin", "safety", "field"),
-        "block": ("admin", "safety", "field"),
+        "block": ("admin", "safety", "field", "dispatcher"),
         "clear": ("admin", "safety", "field"),
-        "occupy": ("admin", "field", "safety"),
+        "occupy": ("admin", "field", "safety", "dispatcher"),
         "release": ("admin", "field", "safety"),
         "maintain": ("admin", "safety"),
         "reopen": ("admin", "safety"),
@@ -219,6 +252,9 @@ class RuleEngine:
         "stabilize": ("admin", "safety", "dispatcher"),
         "recover": ("admin", "safety", "dispatcher"),
         "close": ("admin", "safety"),
+        "linkage_cancel": ("admin", "safety", "dispatcher"),
+        "linkage_complete": ("admin", "safety", "dispatcher"),
+        "linkage_retry": ("admin", "safety", "dispatcher"),
         "assign": ("admin", "dispatcher", "safety"),
         "accept": ("admin", "field", "dispatcher"),
         "complete": ("admin", "field", "dispatcher"),
@@ -236,6 +272,7 @@ class RuleEngine:
     }
     CUSTOM_TRANSITIONS = {
         ("sensor", "raise_alarm"): _sensor_alarm,
+        ("ventilation", "emergency_start"): _start_emergency_fan,
         ("incident", "close"): _close_incident,
         ("task", "complete"): _complete_task,
     }

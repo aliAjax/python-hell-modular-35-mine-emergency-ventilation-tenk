@@ -1,11 +1,93 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>矿井应急避险与通风协调</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:860px;margin:auto}pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer}</style></head>
-<body><main><h1>矿井应急避险与通风协调</h1><p>这是最小演示页面，主要操作通过JSON API完成。</p><p><button onclick="checkHealth()">检查服务状态</button></p><pre id="result">等待操作</pre>
-<h2>常用接口</h2><pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
-<script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>矿井气体报警联动单</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937;background:#f9fafb}
+main{max-width:1120px;margin:auto}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin:1rem 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+label{display:block;font-size:.9rem;margin:.5rem 0 .25rem}
+input{width:100%;padding:.5rem;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box}
+button{padding:.5rem .8rem;border:0;border-radius:6px;background:#2563eb;color:white;cursor:pointer}
+button.secondary{background:#6b7280}
+button.danger{background:#dc2626}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid #e5e7eb;padding:.5rem;text-align:left;vertical-align:top}
+th{background:#f3f4f6}
+.badge{display:inline-block;padding:.15rem .45rem;border-radius:999px;font-size:.78rem;background:#e5e7eb}
+.completed{background:#dcfce7;color:#166534}.pending{background:#fef3c7;color:#92400e}.cancelled{background:#fee2e2;color:#991b1b}.active{background:#dbeafe;color:#1e40af}
+.muted{color:#6b7280;font-size:.85rem}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem}.steps{margin-top:.75rem}
+</style>
+</head>
+<body><main>
+<h1>矿井气体报警联动单</h1>
+<p class="muted">同一事件和污染区域只创建一张联动单；重复报警返回原单。每一步记录执行人和执行时间。</p>
+<div class="card">
+  <div class="grid">
+    <div><label>调度员 ID</label><input id="user" value="dispatch-1"></div>
+    <div><label>角色</label><input id="role" value="dispatcher"></div>
+    <div><label>事件 ID</label><input id="incidentId" placeholder="incident uuid"></div>
+    <div><label>污染区域</label><input id="area" placeholder="M-01"></div>
+  </div>
+  <p>
+    <button onclick="triggerLinkage()">报警并生成/获取联动单</button>
+    <button class="secondary" onclick="loadOrders()">刷新列表</button>
+  </p>
+  <pre id="result" class="muted">等待操作</pre>
+</div>
+<div id="orders"><p class="muted">正在加载联动单...</p></div>
+</main>
+<script>
+function headers(){return {'Content-Type':'application/json','X-User-Id':user.value,'X-Role':role.value}}
+function esc(value){return String(value ?? '').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function request(url, options){
+  const r=await fetch(url,options); const body=await r.json();
+  if(!r.ok) throw new Error((body.type||'Error')+': '+(body.error||r.statusText));
+  return body;
+}
+async function triggerLinkage(){
+  result.textContent='处理中...';
+  try{
+    const body=await request('/api/linkage-orders',{method:'POST',headers:headers(),body:JSON.stringify({incident_id:incidentId.value,contaminated_area:area.value})});
+    result.textContent='联动单：'+body.id+'，状态：'+body.status;
+    await loadOrders();
+  }catch(error){result.textContent=error.message}
+}
+async function retryOrder(id,event){
+  event.stopPropagation();
+  await request('/api/linkage-orders/'+encodeURIComponent(id)+'/retry',{method:'POST',headers:headers()});
+  await loadOrders();
+}
+async function cancelOrder(id,event){
+  event.stopPropagation();
+  const reason=prompt('请输入取消原因'); if(!reason) return;
+  await request('/api/entities/'+encodeURIComponent(id)+'/actions',{method:'POST',headers:headers(),body:JSON.stringify({action:'cancel',data:{reason}})});
+  await loadOrders();
+}
+function stepRows(steps){
+  const names={isolate_passage:'隔离通道',start_emergency_fan:'启动应急风机',verify_emergency_capacity:'风机容量校核',reserve_refuges:'占用避险硐室',dispatch_missing_worker:'失联人员派单'};
+  return '<table><thead><tr><th>步骤</th><th>目标</th><th>状态</th><th>执行人</th><th>时间</th><th>结果/待处理原因</th></tr></thead><tbody>'+
+    steps.sort((a,b)=>(a.phase||999)-(b.phase||999)||String(a.id).localeCompare(String(b.id))).map(s=>`<tr>
+      <td>${esc(names[s.type]||s.type)}</td><td>${esc(s.target_name||s.target_id||'-')}</td>
+      <td><span class="badge ${esc(s.status)}">${esc(s.status)}</span></td>
+      <td>${esc(s.executed_by||s.cancelled_by||'-')}</td><td>${esc(s.executed_at||s.cancelled_at||'-')}</td>
+      <td>${esc(s.status==='pending'?s.reason:s.result_reason)||'-'}</td></tr>`).join('')+'</tbody></table>';
+}
+async function loadOrders(){
+  const payload=await request('/api/linkage-orders');
+  if(!payload.items.length){orders.innerHTML='<p class="muted">暂无联动单。</p>';return}
+  orders.innerHTML=payload.items.map(order=>{
+    const d=order.data;
+    return `<div class="card"><h3>${esc(order.id)} <span class="badge ${esc(order.status)}">${esc(order.status)}</span></h3>
+      <p class="muted">事件：${esc(d.incident_id)} ｜ 污染区域：${esc(d.contaminated_area)} ｜ 受影响区域：${esc((d.affected_areas||[]).join(', '))}<br>
+      创建：${esc(order.created_by)} / ${esc(order.created_at)} ｜ 完成：${esc(d.completed_by||'-')} / ${esc(d.completed_at||'-')} ｜ 取消：${esc(d.cancelled_by||'-')} / ${esc(d.cancelled_at||'-')}</p>
+      <p><button class="secondary" onclick="retryOrder('${esc(order.id)}',event)" ${order.status==='active'?'':'disabled'}>重试待处理</button>
+      <button class="danger" onclick="cancelOrder('${esc(order.id)}',event)" ${order.status==='active'?'':'disabled'}>取消</button></p>
+      <div class="steps">${stepRows(d.steps||[])}</div></div>`;
+  }).join('');
+}
+loadOrders().catch(error=>{orders.textContent=error.message});
+</script>
+</body></html>

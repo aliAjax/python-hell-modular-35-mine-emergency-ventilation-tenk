@@ -104,6 +104,20 @@ def create_handler(service, rules, static_dir):
                 if parts == ["api", "offline-records"]:
                     body = self._body()
                     return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})
+                if len(parts) == 2 and parts[0] == "api" and parts[1] == "linkage-orders":
+                    body = self._body()
+                    return self._send(
+                        201,
+                        service.trigger_gas_linkage(
+                            actor,
+                            body.get("incident_id"),
+                            body.get("contaminated_area"),
+                            body.get("sensor_id"),
+                            body.get("alarm_id"),
+                        ),
+                    )
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "linkage-orders" and parts[3] == "retry":
+                    return self._send(200, service.retry_linkage(actor, parts[2]))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)
@@ -129,7 +143,7 @@ def create_handler(service, rules, static_dir):
                     )
                 if len(parts) == 5 and parts[0] == "api" and parts[4] == "actions":
                     return self._send(200, service.transition(actor, parts[2], parts[3], self._body(), None))
-                if len(parts) == 2 and parts[0] == "api":
+                if len(parts) == 2 and parts[0] == "api" and parts[1] != "linkage-orders":
                     body = self._body()
                     idem = self.headers.get("Idempotency-Key")
                     return self._send(201, service.create(actor, parts[1], body, idem))
